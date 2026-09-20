@@ -1,16 +1,14 @@
-# Use official Node.js lightweight image
-FROM node:20-bullseye-slim
+FROM node:20-slim
 
-# Install Python, pip, ffmpeg, and curl
+# Install python3, ffmpeg, curl, and ca-certificates from current Debian repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
-    python3-pip \
     ffmpeg \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp globally
+# Install latest standalone yt-dlp binary
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
 
@@ -19,7 +17,7 @@ WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 # Copy application files
 COPY . .
@@ -27,7 +25,7 @@ COPY . .
 # Ensure downloads directory exists
 RUN mkdir -p downloads
 
-# Expose port (Render/Railway/Fly automatically map this)
+# Port setup
 ENV PORT=3000
 EXPOSE 3000
 
