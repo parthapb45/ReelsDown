@@ -213,84 +213,26 @@
     currentUrl = '';
   });
 
-  // ---- Download ----
+  // ---- Direct Native Download (Instant browser prompt) ----
 
-  downloadBtn.addEventListener('click', async () => {
+  downloadBtn.addEventListener('click', () => {
     if (!currentUrl) return;
 
     const formatId = qualitySelect.value;
     downloadBtn.disabled = true;
-    downloadBtnTxt.textContent = 'Downloading…';
-    progressWrap.hidden = false;
-    progressBar.style.width = '15%';
-    progressLabel.textContent = 'Starting download…';
+    downloadBtnTxt.textContent = 'Starting Download…';
 
-    try {
-      // Start a simulated progress while we wait
-      let progress = 15;
-      const progressInterval = setInterval(() => {
-        if (progress < 85) {
-          progress += Math.random() * 8;
-          progressBar.style.width = `${Math.min(progress, 85)}%`;
-        }
-      }, 500);
+    const downloadUrl = `/api/download?url=${encodeURIComponent(currentUrl)}&formatId=${encodeURIComponent(formatId)}`;
 
-      progressLabel.textContent = 'Processing video…';
+    // Trigger direct native browser download prompt
+    window.location.href = downloadUrl;
 
-      const res = await fetch('/api/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: currentUrl, formatId }),
-      });
+    showToast('Download started! Check your browser downloads.', 'success', 5000);
 
-      clearInterval(progressInterval);
-
-      if (!res.ok) {
-        let errMsg = 'Download failed';
-        try {
-          const errData = await res.json();
-          errMsg = errData.error || errMsg;
-        } catch { /* response wasn't JSON */ }
-        throw new Error(errMsg);
-      }
-
-      progressBar.style.width = '90%';
-      progressLabel.textContent = 'Saving file…';
-
-      // Get the blob and trigger download
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = blobUrl;
-
-      // Extract filename from Content-Disposition or generate one
-      const disposition = res.headers.get('Content-Disposition');
-      let filename = `reel_${Date.now()}.mp4`;
-      if (disposition) {
-        const match = disposition.match(/filename="?([^";\n]+)"?/);
-        if (match) filename = match[1];
-      }
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(blobUrl);
-
-      progressBar.style.width = '100%';
-      progressLabel.textContent = 'Done!';
-      showToast('Video downloaded successfully!', 'success');
-    } catch (err) {
-      showToast(err.message || 'Download failed', 'error');
-      progressLabel.textContent = 'Failed';
-    } finally {
+    setTimeout(() => {
       downloadBtn.disabled = false;
       downloadBtnTxt.textContent = 'Download MP4';
-      setTimeout(() => {
-        progressWrap.hidden = true;
-        progressBar.style.width = '0%';
-      }, 3000);
-    }
+    }, 2500);
   });
 
   // ---- Modal Logic (About, Privacy, Terms) ----
@@ -367,4 +309,11 @@
 
   // ---- Init ----
   checkHealth();
+
+  // Show error toast if redirected with error query
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('error')) {
+    showToast(urlParams.get('error'), 'error');
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
 })();
