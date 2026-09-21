@@ -213,8 +213,7 @@
     currentUrl = '';
   });
 
-  // ---- Direct Native Download + Adsterra Direct Link ----
-  const AD_DIRECT_LINK = '#';
+  // ---- Direct Native Download (Clean, instant, no extra tab) ----
 
   downloadBtn.addEventListener('click', () => {
     if (!currentUrl) return;
@@ -222,19 +221,8 @@
     const formatId = qualitySelect.value;
     const downloadUrl = `/api/download?url=${encodeURIComponent(currentUrl)}&formatId=${encodeURIComponent(formatId)}`;
 
-    // 1. Open high-earning ad in a new tab
-    if (AD_DIRECT_LINK) {
-      try {
-        window.open(AD_DIRECT_LINK, '_blank');
-      } catch (e) {
-        // Continue download even if popup is blocked
-      }
-    }
-
-    // 2. Trigger direct native browser download prompt in current window
-    setTimeout(() => {
-      window.location.href = downloadUrl;
-    }, 150);
+    // Trigger direct native browser download prompt immediately
+    window.location.href = downloadUrl;
 
     downloadBtn.disabled = true;
     downloadBtnTxt.textContent = 'Starting Download…';
