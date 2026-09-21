@@ -3,6 +3,8 @@ const cors = require('cors');
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -134,6 +136,9 @@ app.post('/api/info', async (req, res) => {
 
     const info = JSON.parse(raw);
 
+    // Cache video info in memory so download doesn't have to re-scrape Instagram
+    videoInfoCache.set(url, { info, timestamp: Date.now() });
+
     // Collect available video heights for quality selector
     const heights = new Set();
     for (const f of (info.formats || [])) {
@@ -170,6 +175,17 @@ app.post('/api/info', async (req, res) => {
   }
 });
 
+// Cache for video info: prevents double-scraping Instagram on download
+const videoInfoCache = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of videoInfoCache.entries()) {
+    if (now - v.timestamp > 30 * 60 * 1000) {
+      videoInfoCache.delete(k);
+    }
+  }
+}, 10 * 60 * 1000);
+
 // Rate Limiting & Concurrency Control (Prevents Server Crash Under Heavy Load)
 let activeDownloads = 0;
 const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT_DOWNLOADS, 10) || 4;
@@ -197,18 +213,64 @@ function rateLimiter(req, res, next) {
 app.use('/api/', rateLimiter);
 
 // ---------------------------------------------------------------------------
+// Helper: Stream direct video URL from Instagram/Facebook CDN directly (INSTANT!)
 // ---------------------------------------------------------------------------
-// API: Download video (Supports both GET direct download and POST)
-// ---------------------------------------------------------------------------
-app.all('/api/download', async (req, res) => {
-  const url = req.query.url || req.body?.url;
-  const formatId = req.query.formatId || req.body?.formatId;
+function streamDirectUrl(directUrl, res, req, originalUrl, formatId) {
+  try {
+    const client = directUrl.startsWith('https') ? https : http;
+    const parsed = new URL(directUrl);
 
-  if (!url || !isValidUrl(url)) {
-    return res.status(400).json({ error: 'Invalid URL.' });
+    const reqOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port || (directUrl.startsWith('https') ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://www.instagram.com/',
+        'Accept': '*/*',
+      },
+    };
+
+    const proxyReq = client.request(reqOptions, (proxyRes) => {
+      // Follow HTTP redirects (301, 302, etc.)
+      if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
+        return streamDirectUrl(proxyRes.headers.location, res, req, originalUrl, formatId);
+      }
+
+      if (proxyRes.statusCode >= 400) {
+        console.warn(`CDN stream status ${proxyRes.statusCode}, falling back to yt-dlp`);
+        return downloadWithYtdlp(originalUrl, formatId, req, res);
+      }
+
+      res.setHeader('Content-Disposition', `attachment; filename="ReelsDown_${Date.now()}.mp4"`);
+      res.setHeader('Content-Type', 'video/mp4');
+      if (proxyRes.headers['content-length']) {
+        res.setHeader('Content-Length', proxyRes.headers['content-length']);
+      }
+
+      proxyRes.pipe(res);
+      proxyRes.on('error', (e) => {
+        console.error('Proxy stream pipe error:', e.message);
+      });
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error('Direct stream connection error:', err.message);
+      downloadWithYtdlp(originalUrl, formatId, req, res);
+    });
+
+    proxyReq.end();
+  } catch (err) {
+    console.error('streamDirectUrl exception:', err.message);
+    downloadWithYtdlp(originalUrl, formatId, req, res);
   }
+}
 
-  // Crash Protection: Queue / limit concurrent video processing
+// ---------------------------------------------------------------------------
+// Helper: Full yt-dlp fallback download
+// ---------------------------------------------------------------------------
+async function downloadWithYtdlp(url, formatId, req, res) {
   if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
     const busyMsg = 'Server is currently busy processing other downloads. Please wait a few seconds and try again.';
     if (req.method === 'GET') {
@@ -222,8 +284,6 @@ app.all('/api/download', async (req, res) => {
   const outputTemplate = path.join(DOWNLOADS_DIR, `${fileId}.%(ext)s`);
 
   try {
-    // Speed Optimization: Prefer pre-merged MP4 first (instant, no merge needed),
-    // then merge separate streams using stream copy (no re-encoding, 10x faster)
     let formatStr;
     if (formatId && formatId !== 'best') {
       formatStr = `b[height<=${formatId}][ext=mp4]/bv*[height<=${formatId}]+ba/b[height<=${formatId}]/b[ext=mp4]/bv*+ba/b`;
@@ -234,8 +294,8 @@ app.all('/api/download', async (req, res) => {
     const args = [
       '-f', formatStr,
       '--merge-output-format', 'mp4',
-      '-N', '4', // Multi-threaded downloading (speeds up download by 3x-4x)
-      '--postprocessor-args', 'Merger:-c:v copy -c:a copy', // Direct stream copy: NO CPU re-encoding lag!
+      '-N', '4',
+      '--postprocessor-args', 'Merger:-c:v copy -c:a copy',
       '--no-warnings',
       '--no-playlist',
       '--no-check-certificates',
@@ -250,7 +310,6 @@ app.all('/api/download', async (req, res) => {
 
     await runYtdlp(args);
 
-    // Locate the downloaded file
     const files = fs.readdirSync(DOWNLOADS_DIR).filter((f) => f.startsWith(fileId));
     if (files.length === 0) {
       throw new Error('Download completed but file was not found on disk.');
@@ -267,7 +326,6 @@ app.all('/api/download', async (req, res) => {
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     stream.on('end', () => {
-      // Auto-cleanup after download completes
       setTimeout(() => {
         try { fs.unlinkSync(filePath); } catch {}
       }, 5000);
@@ -283,6 +341,46 @@ app.all('/api/download', async (req, res) => {
   } finally {
     activeDownloads = Math.max(0, activeDownloads - 1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// API: Download video (Supports both GET direct download and POST)
+// ---------------------------------------------------------------------------
+app.all('/api/download', async (req, res) => {
+  const url = req.query.url || req.body?.url;
+  const formatId = req.query.formatId || req.body?.formatId;
+
+  if (!url || !isValidUrl(url)) {
+    return res.status(400).json({ error: 'Invalid URL.' });
+  }
+
+  // 1. Check memory cache for instant direct CDN streaming
+  const cached = videoInfoCache.get(url);
+  const info = cached?.info;
+
+  if (info && info.formats) {
+    // Find progressive formats (video + audio already combined in MP4 by Instagram)
+    const progressives = (info.formats || []).filter(
+      (f) => f.url && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
+    );
+
+    let chosen = null;
+    if (formatId && formatId !== 'best') {
+      chosen = progressives.find((f) => String(f.height) === String(formatId))
+        || progressives.find((f) => f.height <= parseInt(formatId, 10))
+        || progressives[progressives.length - 1];
+    } else {
+      chosen = progressives[progressives.length - 1] || (info.url ? { url: info.url } : null);
+    }
+
+    if (chosen && chosen.url) {
+      console.log(`⚡ INSTANT STREAM: Piping direct CDN stream for ${url} (height: ${chosen.height || 'best'})`);
+      return streamDirectUrl(chosen.url, res, req, url, formatId);
+    }
+  }
+
+  // 2. Fallback to yt-dlp if not in cache or no progressive format
+  downloadWithYtdlp(url, formatId, req, res);
 });
 
 // ---------------------------------------------------------------------------
