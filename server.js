@@ -197,10 +197,12 @@ function rateLimiter(req, res, next) {
 app.use('/api/', rateLimiter);
 
 // ---------------------------------------------------------------------------
-// API: Download video
 // ---------------------------------------------------------------------------
-app.post('/api/download', async (req, res) => {
-  const { url, formatId } = req.body;
+// API: Download video (Supports both GET direct download and POST)
+// ---------------------------------------------------------------------------
+app.all('/api/download', async (req, res) => {
+  const url = req.query.url || req.body?.url;
+  const formatId = req.query.formatId || req.body?.formatId;
 
   if (!url || !isValidUrl(url)) {
     return res.status(400).json({ error: 'Invalid URL.' });
@@ -208,9 +210,11 @@ app.post('/api/download', async (req, res) => {
 
   // Crash Protection: Queue / limit concurrent video processing
   if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
-    return res.status(429).json({
-      error: 'Server is currently busy processing other downloads. Please wait a few seconds and try again.',
-    });
+    const busyMsg = 'Server is currently busy processing other downloads. Please wait a few seconds and try again.';
+    if (req.method === 'GET') {
+      return res.redirect(`/?error=${encodeURIComponent(busyMsg)}`);
+    }
+    return res.status(429).json({ error: busyMsg });
   }
 
   activeDownloads++;
@@ -249,14 +253,16 @@ app.post('/api/download', async (req, res) => {
     // Locate the downloaded file
     const files = fs.readdirSync(DOWNLOADS_DIR).filter((f) => f.startsWith(fileId));
     if (files.length === 0) {
-      return res.status(500).json({ error: 'Download succeeded but file could not be found.' });
+      throw new Error('Download completed but file was not found on disk.');
     }
 
     const filePath = path.join(DOWNLOADS_DIR, files[0]);
     const ext = path.extname(files[0]) || '.mp4';
+    const stat = fs.statSync(filePath);
 
-    res.setHeader('Content-Disposition', `attachment; filename="reel_${Date.now()}${ext}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="ReelsDown_${Date.now()}${ext}"`);
     res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Length', stat.size);
 
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
@@ -268,9 +274,12 @@ app.post('/api/download', async (req, res) => {
     });
   } catch (err) {
     console.error('Download endpoint error:', err.message);
-    res.status(500).json({
-      error: 'Download failed. The video format could not be merged or the video is restricted.',
-    });
+    const failMsg = 'Download failed. The video may be private or restricted.';
+    if (req.method === 'GET') {
+      res.redirect(`/?error=${encodeURIComponent(failMsg)}`);
+    } else {
+      res.status(500).json({ error: failMsg });
+    }
   } finally {
     activeDownloads = Math.max(0, activeDownloads - 1);
   }
