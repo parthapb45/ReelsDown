@@ -213,20 +213,31 @@
     currentUrl = '';
   });
 
-  // ---- Direct Native Download (Instant browser prompt) ----
+  // ---- Direct Native Download + Adsterra Direct Link ----
+  const AD_DIRECT_LINK = '#';
 
   downloadBtn.addEventListener('click', () => {
     if (!currentUrl) return;
 
     const formatId = qualitySelect.value;
-    downloadBtn.disabled = true;
-    downloadBtnTxt.textContent = 'Starting Download…';
-
     const downloadUrl = `/api/download?url=${encodeURIComponent(currentUrl)}&formatId=${encodeURIComponent(formatId)}`;
 
-    // Trigger direct native browser download prompt
-    window.location.href = downloadUrl;
+    // 1. Open high-earning ad in a new tab
+    if (AD_DIRECT_LINK) {
+      try {
+        window.open(AD_DIRECT_LINK, '_blank');
+      } catch (e) {
+        // Continue download even if popup is blocked
+      }
+    }
 
+    // 2. Trigger direct native browser download prompt in current window
+    setTimeout(() => {
+      window.location.href = downloadUrl;
+    }, 150);
+
+    downloadBtn.disabled = true;
+    downloadBtnTxt.textContent = 'Starting Download…';
     showToast('Download started! Check your browser downloads.', 'success', 5000);
 
     setTimeout(() => {
